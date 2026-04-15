@@ -17,7 +17,7 @@
     "strict": true,
     "target": "es2022" // get error cause (ErrorOptions)
   },
-  "exclude": ["node_modules"],
+  "exclude": ["node_modules", "context"],
   "files": ["./hardhat.config.ts"],
   "include": ["tasks/**/*", "test/**/*", "scripts/**/*", "types/"]
 }

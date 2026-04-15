@@ -29,3 +29,6 @@
 # Environment files
 .env
 .env.*
+
+# Internal working notes, drafts, meeting prep (not for public repo)
+/context/
