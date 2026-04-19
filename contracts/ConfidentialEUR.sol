@@ -50,11 +50,11 @@ import {
  *        6. ERC7984         — encrypted balance update + ACL + event
  *        7. ObserverAccess  — post-super observer ACL grant
  */
-contract ConfidentialEUR is
-    ERC7984ObserverAccess,
-    ERC7984Rwa,
-    ERC7984ERC20Wrapper
-{
+contract ConfidentialEUR is ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapper {
+    
+    error DirectMintDisabled();
+    error DirectBurnDisabled();
+    
     constructor(
         address admin,
         IERC20 underlyingEURC
@@ -91,6 +91,31 @@ contract ConfidentialEUR is
     ///      go through `approveUser` again.
     function revokeUser(address account) external onlyAgent {
         _resetUser(account);
+    }
+
+    // ─── Coverage invariant ──────────────────────────────────────
+    //
+    // Supply changes must go through wrap()/unwrap() so that every cEUR is
+    // backed 1:1 by locked EURC. Disabling direct mint/burn eliminates any
+    // code path that could create unbacked tokens.
+    //
+    // Both functions have two overloads (externalEuint64 vs. euint64) — all
+    // four must revert, otherwise one variant becomes a bypass.
+
+    function confidentialMint(address, externalEuint64, bytes calldata) public override onlyAgent returns (euint64) {
+        revert DirectMintDisabled();
+    }
+
+    function confidentialMint(address, euint64) public override onlyAgent returns (euint64) {
+        revert DirectMintDisabled();
+    }
+
+    function confidentialBurn(address, externalEuint64, bytes calldata) public override onlyAgent returns (euint64) {
+        revert DirectBurnDisabled();
+    }
+
+    function confidentialBurn(address, euint64) public override onlyAgent returns (euint64) {
+        revert DirectBurnDisabled();
     }
 
     // ─── Required multi-inheritance overrides ────────────────────────────────

@@ -1,5 +1,5 @@
-import "@fhevm/hardhat-plugin";
 import "@nomicfoundation/hardhat-chai-matchers";
+import "@fhevm/hardhat-plugin";
 import "@nomicfoundation/hardhat-ethers";
 import "@nomicfoundation/hardhat-verify";
 import "@typechain/hardhat";
