@@ -10,7 +10,7 @@ import { FhevmType } from "@fhevm/mock-utils";
  * state needs `assertCoprocessorInitialized`, otherwise FHE ops revert.
  */
 async function deployFixture() {
-    const [admin, agent, user1, outsider] = await ethers.getSigners();
+    const [admin, agent, user1, user2, outsider] = await ethers.getSigners();
 
     const MockEURC = await ethers.getContractFactory("MockEURC");
     const eurc = await MockEURC.deploy();
@@ -26,7 +26,7 @@ async function deployFixture() {
     await ceur.connect(admin).addAgent(agent.address);
     await hre.fhevm.assertCoprocessorInitialized(ceur, "ConfidentialEUR");
 
-    return { ceur, eurc, admin, agent, user1, outsider };
+    return { ceur, eurc, admin, agent, user1, user2, outsider };
 }
 
 describe("ConfidentialEUR", function () {
@@ -112,7 +112,7 @@ describe("ConfidentialEUR", function () {
         });
     });
 
-    describe("Coverage invariant (ADR-008)", function () {
+    describe("Coverage invariant", function () {
         let ceur: any;
         let agent: any;
         let user1: any;
@@ -299,7 +299,167 @@ describe("ConfidentialEUR", function () {
         });
     });
 
+    describe("Confidential Transfer (M5)", function () {
+        let ceur: any;
+        let eurc: any;
+        let agent: any;
+        let alice: any;      // = user1  (sender, will be pre-funded)
+        let bob: any;        // = user2  (receiver, starts at 0)
+        let outsider: any;   // no KYC  (used in KYC-revert tests)
 
+        const WRAP_AMOUNT = 1000_000_000n;      // 1000 cEUR, Alice's starting balance
+        const TRANSFER_AMOUNT = 500_000_000n;   // 500 cEUR, default transfer size
+        const OVERDRAFT_AMOUNT = 2000_000_000n; // 2000 cEUR, silent failure transfer size
+        const FORWARD_AMOUNT = 600_000_000n;    // Alice → Bob
+        const BACKWARD_AMOUNT = 200_000_000n;   // Bob → Alice
+
+        beforeEach(async function () {
+            ({ ceur, eurc, agent, user1: alice, user2: bob, outsider } = await deployFixture());
+
+            // KYC both happy-path users; `outsider` stays unapproved on purpose.
+            await ceur.connect(agent).approveUser(alice.address);
+            await ceur.connect(agent).approveUser(bob.address);
+
+            // Pre-fund Alice via wrap so every transfer test starts from a known state.
+            await eurc.connect(alice).mint(alice.address, WRAP_AMOUNT);
+            await eurc.connect(alice).approve(await ceur.getAddress(), WRAP_AMOUNT);
+            await ceur.connect(alice).wrap(alice.address, WRAP_AMOUNT);
+        });
+
+
+        it("happy path: alice to bob", async function () {
+            // Arrange: Alice encrypts the transfer amount
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,           // which encrypted type we want
+                TRANSFER_AMOUNT,              // plaintext value (bigint)
+                await ceur.getAddress(),      // target contract (ACL scope)
+                alice.address                 // who is producing the input (= future msg.sender)
+            );
+
+            // Act: Alice sends 500 cEUR to Bob
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+            
+            // Assert: Alice's balance decreased by TRANSFER_AMOUNT
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+
+            // Assert: Bob received TRANSFER_AMOUNT
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(TRANSFER_AMOUNT);
+        });
+
+        it("silent failure: transfer exceeds balance", async function () {
+            // Arrange: Alice encrypts the transfer amount
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,           
+                OVERDRAFT_AMOUNT,             
+                await ceur.getAddress(),     
+                alice.address               
+            );
+
+            // Act: Alice sends 2000 cEUR to Bob
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+            
+            // Assert: Alice's balance = WRAP AMOUNT (unchanged)
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT);
+
+            // Assert: Bob received nothing (silent failure → transferred = enc(0))
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(0n);
+        });
+
+        it("transfer to self leaves balance unchanged", async function () {
+            // Arrange: Alice encrypts the transfer amount
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,           
+                TRANSFER_AMOUNT,             
+                await ceur.getAddress(),     
+                alice.address              
+            ); 
+
+            // Act: Alice sends 500 cEUR to Alice
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                alice.address,
+                enc.externalEuint,
+                enc.inputProof
+            );   
+
+            // Assert: Alice's balance = WRAP AMOUNT (unchanged)
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT);
+        });
+
+        it("bidirectional transfers preserve total balance", async function () {
+            // Arrange 1: Alice encrypts the transfer amount
+            const enc1 = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                FORWARD_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            // Act 1: Alice sends 600 cEUR to Bob
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc1.externalEuint,
+                enc1.inputProof
+            );
+
+            // Arrange 2: Bob encrypts the transfer amount
+            const enc2 = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                BACKWARD_AMOUNT,
+                await ceur.getAddress(),
+                bob.address
+            );
+
+            // Act 2: Bob sends 200 cEUR to Alice
+            await ceur.connect(bob)["confidentialTransfer(address,bytes32,bytes)"](
+                alice.address,
+                enc2.externalEuint,
+                enc2.inputProof
+            );            
+
+            // Alice: started with 1000, sent 600, received 200
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - FORWARD_AMOUNT + BACKWARD_AMOUNT);  // = 600_000_000n
+
+            // Bob: started with 0, received 600, sent 200
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(FORWARD_AMOUNT - BACKWARD_AMOUNT);  // = 400_000_000n
+        });
+
+    });
 
 
 });
