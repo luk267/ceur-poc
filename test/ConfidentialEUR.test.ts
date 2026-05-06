@@ -543,4 +543,243 @@ describe("ConfidentialEUR", function () {
             expect(charlieBalance).to.equal(TRANSFER_AMOUNT);
         });
     });
+
+
+    describe("Compliance (M6)", function () {
+        let ceur: any;
+        let eurc: any;
+        let agent: any;
+        let alice: any;      // = user1  (sender, will be pre-funded)
+        let bob: any;        // = user2  (receiver, starts at 0)
+
+        const WRAP_AMOUNT = 1000_000_000n;      // 1000 cEUR, Alice's starting balance
+        const TRANSFER_AMOUNT = 500_000_000n;   // 500 cEUR, default transfer size
+        const FREEZE_AMOUNT = 700_000_000n;   // 700 cEUR frozen → 300 available
+        const AVAILABLE_AMOUNT = 300_000_000n;   // 1000 - 700
+        const OVERDRAW_AMOUNT = 400_000_000n;   // > 300 → silent failure
+        const UNWRAP_OVERDRAW = 500_000_000n;   // > 300
+
+        beforeEach(async function () {
+            ({ ceur, eurc, agent, user1: alice, user2: bob } = await deployFixture());
+
+            // KYC both happy-path users.
+            await ceur.connect(agent).approveUser(alice.address);
+            await ceur.connect(agent).approveUser(bob.address);
+
+            // Pre-fund Alice via wrap so every transfer test starts from a known state.
+            await eurc.connect(alice).mint(alice.address, WRAP_AMOUNT);
+            await eurc.connect(alice).approve(await ceur.getAddress(), WRAP_AMOUNT);
+            await ceur.connect(alice).wrap(alice.address, WRAP_AMOUNT);
+        });
+
+
+        it("pause blocks confidentialTransfer", async function () {
+            await ceur.connect(agent).pause();
+            
+            // Alice encrypts 500 cEUR.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            // Alice → Bob, 500 cEUR.
+            await expect(
+                ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                    bob.address,
+                    enc.externalEuint,
+                    enc.inputProof
+                )
+            ).to.be.revertedWithCustomError(ceur, "EnforcedPause");
+        });
+
+        it("unpause restores transfers", async function () {
+            await ceur.connect(agent).pause();
+            await ceur.connect(agent).unpause();
+            
+            // Alice encrypts 500 cEUR.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            // Alice → Bob, 500 cEUR.
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice: 1000 - 500 = 500
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+
+            // Bob: 0 + 500 = 500
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(TRANSFER_AMOUNT); 
+        });
+
+        it("partial freeze allows transfer within available", async function () {
+            // Agent encrypts the freeze amount — proof binds to msg.sender = agent.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                FREEZE_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+            
+            await ceur.connect(agent)["setConfidentialFrozen(address,bytes32,bytes)"](
+                alice.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice encrypts 300 cEUR.
+            const enc2 = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                AVAILABLE_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            // Alice → Bob, 300 cEUR.
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc2.externalEuint,
+                enc2.inputProof
+            );
+
+            // Alice: 1000 - 300 = 700
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - AVAILABLE_AMOUNT);
+
+            // Bob: 0 + 300 = 300
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(AVAILABLE_AMOUNT); 
+        });
+
+        it("partial freeze silently fails above available", async function () {
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                FREEZE_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+            
+            await ceur.connect(agent)["setConfidentialFrozen(address,bytes32,bytes)"](
+                alice.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice encrypts 400 cEUR.
+            const enc2 = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                OVERDRAW_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            // Alice → Bob, 400 cEUR.
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                bob.address,
+                enc2.externalEuint,
+                enc2.inputProof
+            );
+
+            // Alice: 1000 - 0 = 1000
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT);
+
+            // Bob: 0 + 0 = 0
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(0n);
+        });
+
+        it("freeze blocks unwrap above available", async function () {
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                FREEZE_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+            
+            await ceur.connect(agent)["setConfidentialFrozen(address,bytes32,bytes)"](
+                alice.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            const unwrapEnc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                UNWRAP_OVERDRAW,
+                await ceur.getAddress(),
+                alice.address
+            );
+
+            const tx = await ceur.connect(alice)["unwrap(address,address,bytes32,bytes)"](
+                alice.address,
+                alice.address,
+                unwrapEnc.externalEuint,
+                unwrapEnc.inputProof
+            );
+            const receipt = await tx.wait();
+
+            // extract burntAmount handle from UnwrapRequested event
+            const unwrapEvent = receipt.logs.find(
+                (log: any) => ceur.interface.parseLog(log)?.name === "UnwrapRequested"
+            );
+            const parsed = ceur.interface.parseLog(unwrapEvent);
+            const burntAmountHandle = parsed.args.amount;
+
+            // get decryption proof from mock
+            const decryptionResult = await hre.fhevm.publicDecrypt([burntAmountHandle]);
+            const cleartext = decryptionResult.clearValues[burntAmountHandle];
+            const proof = decryptionResult.decryptionProof;
+
+            expect(cleartext).to.equal(0n);
+
+            // finalize — verifies proof, releases EURC
+            await ceur.finalizeUnwrap(burntAmountHandle, cleartext, proof);
+
+            // Alice gets nothing back.
+            expect(await eurc.balanceOf(alice.address)).to.equal(0n);
+
+            // EURC stays locked in the pool.
+            expect(await eurc.balanceOf(await ceur.getAddress())).to.equal(WRAP_AMOUNT);
+
+            // Alice's confidential balance unchanged — the actual burn was 0.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT);
+        
+        });
+
+
+    });
+
+
 });
