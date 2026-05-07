@@ -1,0 +1,8 @@
+node_modules
+artifacts
+cache
+types
+coverage
+dist
+fhevmTemp
+package-lock.json

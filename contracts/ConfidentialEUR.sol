@@ -59,7 +59,7 @@ contract ConfidentialEUR is ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapp
         address admin,
         IERC20 underlyingEURC
     )
-        ERC7984("Confidential EUR", "cEUR", "https://ceur.example/metadata.json")
+        ERC7984("Confidential EUR", "cEUR", "https://raw.githubusercontent.com/luk267/ceur-poc/main/docs/metadata.json")
         ERC7984Rwa(admin)
         ERC7984ERC20Wrapper(underlyingEURC)
     {

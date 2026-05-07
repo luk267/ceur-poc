@@ -1,0 +1,13 @@
+{
+    "name": "Confidential EUR",
+    "symbol": "cEUR",
+    "decimals": 6,
+    "description": "ERC-7984 confidential stablecoin on Zama fhEVM. Lock-and-mint wrapper around Circle's EURC with a built-in compliance layer (KYC allowlist, freeze, force transfer, pause, observer access). Practical artefact of a Master's thesis on confidential B2B payments under MiCAR.",
+    "external_url": "https://github.com/luk267/ceur-poc",
+    "underlying": {
+        "name": "Euro Coin",
+        "symbol": "EURC",
+        "issuer": "Circle Internet Financial",
+        "decimals": 6
+    }
+}

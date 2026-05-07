@@ -17,10 +17,7 @@ async function deployFixture() {
     await eurc.waitForDeployment();
 
     const ConfidentialEUR = await ethers.getContractFactory("ConfidentialEUR");
-    const ceur = await ConfidentialEUR.connect(admin).deploy(
-        admin.address,
-        await eurc.getAddress()
-    );
+    const ceur = await ConfidentialEUR.connect(admin).deploy(admin.address, await eurc.getAddress());
     await ceur.waitForDeployment();
 
     await ceur.connect(admin).addAgent(agent.address);
@@ -106,9 +103,10 @@ describe("ConfidentialEUR", function () {
         });
 
         it("outsiders cannot call approveUser", async function () {
-            await expect(
-                ceur.connect(outsider).approveUser(user1.address)
-            ).to.be.revertedWithCustomError(ceur, "AccessControlUnauthorizedAccount");
+            await expect(ceur.connect(outsider).approveUser(user1.address)).to.be.revertedWithCustomError(
+                ceur,
+                "AccessControlUnauthorizedAccount",
+            );
         });
     });
 
@@ -123,28 +121,27 @@ describe("ConfidentialEUR", function () {
 
         it("confidentialMint(address,externalEuint64,bytes) reverts", async function () {
             await expect(
-                ceur.connect(agent)["confidentialMint(address,bytes32,bytes)"](user1.address, ethers.ZeroHash, "0x")
+                ceur.connect(agent)["confidentialMint(address,bytes32,bytes)"](user1.address, ethers.ZeroHash, "0x"),
             ).to.be.revertedWithCustomError(ceur, "DirectMintDisabled");
         });
 
         it("confidentialMint(address,euint64) reverts", async function () {
             await expect(
-                ceur.connect(agent)["confidentialMint(address,bytes32)"](user1.address, ethers.ZeroHash)
+                ceur.connect(agent)["confidentialMint(address,bytes32)"](user1.address, ethers.ZeroHash),
             ).to.be.revertedWithCustomError(ceur, "DirectMintDisabled");
         });
 
         it("confidentialBurn(address,externalEuint64,bytes) reverts", async function () {
             await expect(
-                ceur.connect(agent)["confidentialBurn(address,bytes32,bytes)"](user1.address, ethers.ZeroHash, "0x")
+                ceur.connect(agent)["confidentialBurn(address,bytes32,bytes)"](user1.address, ethers.ZeroHash, "0x"),
             ).to.be.revertedWithCustomError(ceur, "DirectBurnDisabled");
         });
 
         it("confidentialBurn(address,euint64) reverts", async function () {
             await expect(
-                ceur.connect(agent)["confidentialBurn(address,bytes32)"](user1.address, ethers.ZeroHash)
+                ceur.connect(agent)["confidentialBurn(address,bytes32)"](user1.address, ethers.ZeroHash),
             ).to.be.revertedWithCustomError(ceur, "DirectBurnDisabled");
         });
-       
     });
 
     describe("Wrap flow (M4)", function () {
@@ -174,12 +171,7 @@ describe("ConfidentialEUR", function () {
 
             // Assert: encrypted cEUR balance matches
             const handle = await ceur.confidentialBalanceOf(user1.address);
-            const balance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64,
-                handle,
-                await ceur.getAddress(),
-                user1
-            );
+            const balance = await hre.fhevm.userDecryptEuint(FhevmType.euint64, handle, await ceur.getAddress(), user1);
             expect(balance).to.equal(AMOUNT);
         });
 
@@ -188,9 +180,7 @@ describe("ConfidentialEUR", function () {
             // no approve!
             await ceur.connect(agent).approveUser(user1.address);
 
-            await expect(
-                ceur.connect(user1).wrap(user1.address, AMOUNT)
-            ).to.be.reverted;
+            await expect(ceur.connect(user1).wrap(user1.address, AMOUNT)).to.be.reverted;
         });
 
         it("reverts without KYC", async function () {
@@ -198,9 +188,10 @@ describe("ConfidentialEUR", function () {
             await eurc.connect(user1).approve(await ceur.getAddress(), AMOUNT);
             // no approveUser!
 
-            await expect(
-                ceur.connect(user1).wrap(user1.address, AMOUNT)
-            ).to.be.revertedWithCustomError(ceur, "UserRestricted");
+            await expect(ceur.connect(user1).wrap(user1.address, AMOUNT)).to.be.revertedWithCustomError(
+                ceur,
+                "UserRestricted",
+            );
         });
 
         it("maintains the coverage invariant after wrap", async function () {
@@ -245,7 +236,7 @@ describe("ConfidentialEUR", function () {
 
             // Step 3: extract burntAmount handle from UnwrapRequested event
             const unwrapEvent = receipt.logs.find(
-                (log: any) => ceur.interface.parseLog(log)?.name === "UnwrapRequested"
+                (log: any) => ceur.interface.parseLog(log)?.name === "UnwrapRequested",
             );
             const parsed = ceur.interface.parseLog(unwrapEvent);
             const burntAmountHandle = parsed.args.amount;
@@ -269,7 +260,7 @@ describe("ConfidentialEUR", function () {
             const receipt = await tx.wait();
 
             const unwrapEvent = receipt.logs.find(
-                (log: any) => ceur.interface.parseLog(log)?.name === "UnwrapRequested"
+                (log: any) => ceur.interface.parseLog(log)?.name === "UnwrapRequested",
             );
             const parsed = ceur.interface.parseLog(unwrapEvent);
             const burntAmountHandle = parsed.args.amount;
@@ -282,9 +273,10 @@ describe("ConfidentialEUR", function () {
             await ceur.finalizeUnwrap(burntAmountHandle, cleartext, proof);
 
             // Second finalize reverts — request already deleted
-            await expect(
-                ceur.finalizeUnwrap(burntAmountHandle, cleartext, proof)
-            ).to.be.revertedWithCustomError(ceur, "InvalidUnwrapRequest");
+            await expect(ceur.finalizeUnwrap(burntAmountHandle, cleartext, proof)).to.be.revertedWithCustomError(
+                ceur,
+                "InvalidUnwrapRequest",
+            );
         });
 
         it("unwrap reverts without KYC", async function () {
@@ -294,7 +286,7 @@ describe("ConfidentialEUR", function () {
             const balanceHandle = await ceur.confidentialBalanceOf(user1.address);
 
             await expect(
-                ceur.connect(user1).unwrap(user1.address, user1.address, balanceHandle)
+                ceur.connect(user1).unwrap(user1.address, user1.address, balanceHandle),
             ).to.be.revertedWithCustomError(ceur, "UserRestricted");
         });
     });
@@ -303,16 +295,16 @@ describe("ConfidentialEUR", function () {
         let ceur: any;
         let eurc: any;
         let agent: any;
-        let alice: any;      // = user1  (sender, will be pre-funded)
-        let bob: any;        // = user2  (receiver, starts at 0)
-        let charlie: any;    // = user3  (operator-transfer recipient, KYC'd)
-        let outsider: any;   // no KYC  (used in KYC-revert tests)
+        let alice: any; // = user1  (sender, will be pre-funded)
+        let bob: any; // = user2  (receiver, starts at 0)
+        let charlie: any; // = user3  (operator-transfer recipient, KYC'd)
+        let outsider: any; // no KYC  (used in KYC-revert tests)
 
-        const WRAP_AMOUNT = 1000_000_000n;      // 1000 cEUR, Alice's starting balance
-        const TRANSFER_AMOUNT = 500_000_000n;   // 500 cEUR, default transfer size
+        const WRAP_AMOUNT = 1000_000_000n; // 1000 cEUR, Alice's starting balance
+        const TRANSFER_AMOUNT = 500_000_000n; // 500 cEUR, default transfer size
         const OVERDRAFT_AMOUNT = 2000_000_000n; // 2000 cEUR, silent failure transfer size
-        const FORWARD_AMOUNT = 600_000_000n;    // Alice → Bob
-        const BACKWARD_AMOUNT = 200_000_000n;   // Bob → Alice
+        const FORWARD_AMOUNT = 600_000_000n; // Alice → Bob
+        const BACKWARD_AMOUNT = 200_000_000n; // Bob → Alice
 
         beforeEach(async function () {
             ({ ceur, eurc, agent, user1: alice, user2: bob, user3: charlie, outsider } = await deployFixture());
@@ -328,34 +320,37 @@ describe("ConfidentialEUR", function () {
             await ceur.connect(alice).wrap(alice.address, WRAP_AMOUNT);
         });
 
-
         it("happy path: alice to bob", async function () {
             // Alice encrypts 500 cEUR.
             const enc = await hre.fhevm.encryptUint(
                 FhevmType.euint64,
                 TRANSFER_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Alice → Bob, 500 cEUR.
-            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                bob.address,
-                enc.externalEuint,
-                enc.inputProof
-            );
+            await ceur
+                .connect(alice)
+                ["confidentialTransfer(address,bytes32,bytes)"](bob.address, enc.externalEuint, enc.inputProof);
 
             // Alice: 1000 - 500 = 500
             const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
             const aliceBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+                FhevmType.euint64,
+                aliceHandle,
+                await ceur.getAddress(),
+                alice,
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
 
             // Bob: 0 + 500 = 500
             const bobHandle = await ceur.confidentialBalanceOf(bob.address);
             const bobBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+                FhevmType.euint64,
+                bobHandle,
+                await ceur.getAddress(),
+                bob,
             );
             expect(bobBalance).to.equal(TRANSFER_AMOUNT);
         });
@@ -366,27 +361,31 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 OVERDRAFT_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Alice → Bob, 2000 cEUR — pipeline runs but transferred = enc(0).
-            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                bob.address,
-                enc.externalEuint,
-                enc.inputProof
-            );
+            await ceur
+                .connect(alice)
+                ["confidentialTransfer(address,bytes32,bytes)"](bob.address, enc.externalEuint, enc.inputProof);
 
             // Alice: 1000 (unchanged, FHE.select picked the no-op branch)
             const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
             const aliceBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+                FhevmType.euint64,
+                aliceHandle,
+                await ceur.getAddress(),
+                alice,
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT);
 
             // Bob: 0 (silent failure → received nothing)
             const bobHandle = await ceur.confidentialBalanceOf(bob.address);
             const bobBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+                FhevmType.euint64,
+                bobHandle,
+                await ceur.getAddress(),
+                bob,
             );
             expect(bobBalance).to.equal(0n);
         });
@@ -397,20 +396,21 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 TRANSFER_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Alice → Alice, 500 cEUR — pipeline subtracts then re-adds, net zero.
-            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                alice.address,
-                enc.externalEuint,
-                enc.inputProof
-            );
+            await ceur
+                .connect(alice)
+                ["confidentialTransfer(address,bytes32,bytes)"](alice.address, enc.externalEuint, enc.inputProof);
 
             // Alice: 1000 - 500 + 500 = 1000
             const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
             const aliceBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+                FhevmType.euint64,
+                aliceHandle,
+                await ceur.getAddress(),
+                alice,
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT);
         });
@@ -421,42 +421,44 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 FORWARD_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Alice → Bob, 600 cEUR.
-            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                bob.address,
-                enc1.externalEuint,
-                enc1.inputProof
-            );
+            await ceur
+                .connect(alice)
+                ["confidentialTransfer(address,bytes32,bytes)"](bob.address, enc1.externalEuint, enc1.inputProof);
 
             // Bob encrypts 200 cEUR.
             const enc2 = await hre.fhevm.encryptUint(
                 FhevmType.euint64,
                 BACKWARD_AMOUNT,
                 await ceur.getAddress(),
-                bob.address
+                bob.address,
             );
 
             // Bob → Alice, 200 cEUR.
-            await ceur.connect(bob)["confidentialTransfer(address,bytes32,bytes)"](
-                alice.address,
-                enc2.externalEuint,
-                enc2.inputProof
-            );
+            await ceur
+                .connect(bob)
+                ["confidentialTransfer(address,bytes32,bytes)"](alice.address, enc2.externalEuint, enc2.inputProof);
 
             // Alice: 1000 - 600 + 200 = 600
             const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
             const aliceBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+                FhevmType.euint64,
+                aliceHandle,
+                await ceur.getAddress(),
+                alice,
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT - FORWARD_AMOUNT + BACKWARD_AMOUNT);
 
             // Bob: 0 + 600 - 200 = 400
             const bobHandle = await ceur.confidentialBalanceOf(bob.address);
             const bobBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+                FhevmType.euint64,
+                bobHandle,
+                await ceur.getAddress(),
+                bob,
             );
             expect(bobBalance).to.equal(FORWARD_AMOUNT - BACKWARD_AMOUNT);
         });
@@ -470,16 +472,14 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 TRANSFER_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Pipeline reverts at the Restricted layer (stage 4) — Alice is no longer ALLOWED.
             await expect(
-                ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                    bob.address,
-                    enc.externalEuint,
-                    enc.inputProof
-                )
+                ceur
+                    .connect(alice)
+                    ["confidentialTransfer(address,bytes32,bytes)"](bob.address, enc.externalEuint, enc.inputProof),
             ).to.be.revertedWithCustomError(ceur, "UserRestricted");
         });
 
@@ -489,16 +489,16 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 TRANSFER_AMOUNT,
                 await ceur.getAddress(),
-                alice.address
+                alice.address,
             );
 
             // Outsider was never approved — recipient-side KYC blocks the transfer.
             await expect(
-                ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
-                    outsider.address,
-                    enc.externalEuint,
-                    enc.inputProof
-                )
+                ceur
+                    .connect(alice)
+                    [
+                        "confidentialTransfer(address,bytes32,bytes)"
+                    ](outsider.address, enc.externalEuint, enc.inputProof),
             ).to.be.revertedWithCustomError(ceur, "UserRestricted");
         });
 
@@ -512,34 +512,35 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64,
                 TRANSFER_AMOUNT,
                 await ceur.getAddress(),
-                bob.address
+                bob.address,
             );
 
             // Bob (operator) moves Alice's funds to Charlie.
-            await ceur.connect(bob)["confidentialTransferFrom(address,address,bytes32,bytes)"](
-                alice.address,
-                charlie.address,
-                enc.externalEuint,
-                enc.inputProof
-            );
+            await ceur
+                .connect(bob)
+                [
+                    "confidentialTransferFrom(address,address,bytes32,bytes)"
+                ](alice.address, charlie.address, enc.externalEuint, enc.inputProof);
 
             // Alice: 1000 - 500 = 500
             const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
             const aliceBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+                FhevmType.euint64,
+                aliceHandle,
+                await ceur.getAddress(),
+                alice,
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
 
             // Charlie: 0 + 500 = 500
             const charlieHandle = await ceur.confidentialBalanceOf(charlie.address);
             const charlieBalance = await hre.fhevm.userDecryptEuint(
-                FhevmType.euint64, charlieHandle, await ceur.getAddress(), charlie
+                FhevmType.euint64,
+                charlieHandle,
+                await ceur.getAddress(),
+                charlie,
             );
             expect(charlieBalance).to.equal(TRANSFER_AMOUNT);
         });
-
-
     });
-
-
 });

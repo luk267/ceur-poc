@@ -29,6 +29,7 @@
 # Environment files
 .env
 .env.*
+!.env.example
 
 # Internal working notes, drafts, meeting prep (not for public repo)
 /context/
