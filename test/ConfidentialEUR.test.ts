@@ -551,6 +551,7 @@ describe("ConfidentialEUR", function () {
         let agent: any;
         let alice: any;      // = user1  (sender, will be pre-funded)
         let bob: any;        // = user2  (receiver, starts at 0)
+        let outsider: any;   // not KYC-approved — used to test receiver restriction
 
         const WRAP_AMOUNT = 1000_000_000n;      // 1000 cEUR, Alice's starting balance
         const TRANSFER_AMOUNT = 500_000_000n;   // 500 cEUR, default transfer size
@@ -560,7 +561,7 @@ describe("ConfidentialEUR", function () {
         const UNWRAP_OVERDRAW = 500_000_000n;   // > 300
 
         beforeEach(async function () {
-            ({ ceur, eurc, agent, user1: alice, user2: bob } = await deployFixture());
+            ({ ceur, eurc, agent, user1: alice, user2: bob, outsider } = await deployFixture());
 
             // KYC both happy-path users.
             await ceur.connect(agent).approveUser(alice.address);
@@ -775,7 +776,145 @@ describe("ConfidentialEUR", function () {
                 FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
             );
             expect(aliceBalance).to.equal(WRAP_AMOUNT);
-        
+
+        });
+
+        it("force bypasses pause", async function () {
+            // Pause the contract — normal transfers would revert with EnforcedPause.
+            await ceur.connect(agent).pause();
+
+            // Agent encrypts the transfer amount — proof binds to msg.sender = agent.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+
+            // Force transfer bypasses Wrapper(1) + Rwa(2) → no whenNotPaused check.
+            await ceur.connect(agent)["forceConfidentialTransferFrom(address,address,bytes32,bytes)"](
+                alice.address,
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice: 1000 - 500 = 500
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+
+            // Bob: 0 + 500 = 500
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(TRANSFER_AMOUNT);
+        });
+
+        it("force bypasses sender restriction", async function () {
+            // Revoke Alice's KYC — a normal transfer from Alice would now revert with UserRestricted.
+            await ceur.connect(agent).revokeUser(alice.address);
+
+            // Agent encrypts the transfer amount.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+
+            // Force transfer skips _checkSenderRestriction via the msg.sig override in Rwa.
+            await ceur.connect(agent)["forceConfidentialTransferFrom(address,address,bytes32,bytes)"](
+                alice.address,
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice: 1000 - 500 = 500
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+
+            // Bob: 0 + 500 = 500
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(TRANSFER_AMOUNT);
+        });
+
+        it("force does not bypass receiver restriction", async function () {
+            // Outsider has no KYC. Rwa only overrides _checkSenderRestriction —
+            // the recipient still goes through Restricted's _checkRecipientRestriction.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+
+            await expect(
+                ceur.connect(agent)["forceConfidentialTransferFrom(address,address,bytes32,bytes)"](
+                    alice.address,
+                    outsider.address,
+                    enc.externalEuint,
+                    enc.inputProof
+                )
+            ).to.be.revertedWithCustomError(ceur, "UserRestricted")
+                .withArgs(outsider.address);
+        });
+
+        it("force does not bypass freeze", async function () {
+            // Freeze 700 of Alice's 1000 → 300 available.
+            const freezeEnc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                FREEZE_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+
+            await ceur.connect(agent)["setConfidentialFrozen(address,bytes32,bytes)"](
+                alice.address,
+                freezeEnc.externalEuint,
+                freezeEnc.inputProof
+            );
+
+            // Try to force-transfer 400 — exceeds the 300 available.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                OVERDRAW_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+
+            // Force bypasses Wrapper(1) + Rwa(2) but still goes through Freezable(5).
+            // FHE.select clamps the transfer to 0 → silent failure.
+            await ceur.connect(agent)["forceConfidentialTransferFrom(address,address,bytes32,bytes)"](
+                alice.address,
+                bob.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice: unchanged at 1000
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), alice
+            );
+            expect(aliceBalance).to.equal(WRAP_AMOUNT);
+
+            // Bob: still 0
+            const bobHandle = await ceur.confidentialBalanceOf(bob.address);
+            const bobBalance = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, bobHandle, await ceur.getAddress(), bob
+            );
+            expect(bobBalance).to.equal(0n);
         });
 
 
