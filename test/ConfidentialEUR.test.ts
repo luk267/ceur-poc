@@ -921,4 +921,99 @@ describe("ConfidentialEUR", function () {
     });
 
 
+    describe("Observer (M7)", function () {
+        let ceur: any;
+        let eurc: any;
+        let agent: any;
+        let alice: any;     // = user1, account holder
+        let bob: any;       // = user2, user-set observer (no KYC needed)
+        let charlie: any;   // = user3, transfer recipient
+        let outsider: any;
+
+        const WRAP_AMOUNT = 1000_000_000n;  // 1000 cEUR, Alice's starting balance
+        const TRANSFER_AMOUNT = 500_000_000n;   // 500 cEUR
+
+        beforeEach(async function () {
+            ({ ceur, eurc, agent, user1: alice, user2: bob, user3: charlie, outsider } = await deployFixture());
+
+            // Alice and Charlie get KYC'd; Bob deliberately does NOT — observers don't transfer.
+            await ceur.connect(agent).approveUser(alice.address);
+            await ceur.connect(agent).approveUser(charlie.address);
+
+            // Pre-fund Alice via wrap so her balance handle is initialized.
+            await eurc.connect(alice).mint(alice.address, WRAP_AMOUNT);
+            await eurc.connect(alice).approve(await ceur.getAddress(), WRAP_AMOUNT);
+            await ceur.connect(alice).wrap(alice.address, WRAP_AMOUNT);
+        });
+
+        it("setObserver grants the observer access to the existing balance", async function () {
+            // Alice appoints Bob — setObserver's initial ACL grant covers the existing balance handle.
+            await ceur.connect(alice).setObserver(alice.address, bob.address);
+
+            // Bob can decrypt Alice's balance — proof that FHE.allow(balanceHandle, bob) ran inside setObserver.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const balanceSeenByBob = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), bob
+            );
+            expect(balanceSeenByBob).to.equal(WRAP_AMOUNT);
+        });
+
+        it("observer keeps access after a subsequent transfer", async function () {
+            // Alice appoints Bob — initial ACL grant covers the current balance handle.
+            await ceur.connect(alice).setObserver(alice.address, bob.address);
+
+            // Alice transfers 500 cEUR to Charlie — _update produces a new balance handle for Alice.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Bob can still decrypt Alice's NEW balance — proof that the _update hook re-allowed him.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const balanceSeenByBob = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), bob
+            );
+            expect(balanceSeenByBob).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+        });
+
+        it("observer abdication revokes ACL on future balance handles", async function () {
+            // Alice appoints Bob, then Bob abdicates — second require-branch in setObserver permits self-removal.
+            await ceur.connect(alice).setObserver(alice.address, bob.address);
+            await ceur.connect(bob).setObserver(alice.address, ethers.ZeroAddress);
+
+            // Alice transfers — _update produces a new balance handle, but observer(alice) is now address(0).
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Bob cannot decrypt the NEW balance handle — no ACL was granted to him post-abdication.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            await expect(
+                hre.fhevm.userDecryptEuint(FhevmType.euint64, aliceHandle, await ceur.getAddress(), bob)
+            ).to.be.rejected;
+        });
+
+        it("outsiders cannot set someone else's observer", async function () {
+            // Outsider is neither the account holder nor the current observer — both require-branches in setObserver fail.
+            await expect(
+                ceur.connect(outsider).setObserver(alice.address, outsider.address)
+            ).to.be.revertedWithCustomError(ceur, "Unauthorized");
+        });
+    });
+
 });
