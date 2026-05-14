@@ -35,8 +35,9 @@ import {
  *         as a lock-and-mint wrapper around Circle's EURC.
  *
  * @dev The direct parent order is load-bearing: Solidity's C3 linearisation turns
- *      `super._update()` into a seven-step compliance pipeline. Reordering the
- *      parents silently reorders the checks.
+ *      `super._update()` into a seven-step inherited compliance pipeline, capped
+ *      by an eighth step in cEUR's own `_update` and `_forceUpdate` overrides.
+ *      Reordering the parents silently reorders the checks.
  *
  *      Linearised MRO (most derived → most base):
  *          cEUR → Wrapper → Rwa → ObserverAccess → Restricted → Freezable → ERC7984
@@ -48,7 +49,9 @@ import {
  *        4. Restricted      — allowlist check, reverts if `from`/`to` != ALLOWED
  *        5. Freezable       — homomorphic available-balance cap (silent failure)
  *        6. ERC7984         — encrypted balance update + ACL + event
- *        7. ObserverAccess  — post-super observer ACL grant
+ *        7. ObserverAccess  — post-super user-observer ACL grant
+ *        8. cEUR            — post-super regulatory-observer ACL grant
+ *                              (fires in both `_update` and `_forceUpdate` paths)
  */
 contract ConfidentialEUR is ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapper {
     
@@ -118,13 +121,48 @@ contract ConfidentialEUR is ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapp
         revert DirectBurnDisabled();
     }
 
+    // ─── Regulatory observer (M7) ────────────────────────────────────────────
+    //
+    // Parallel to OZ's user-controlled `setObserver`/`observer`, this slot
+    // holds an agent-appointed regulator that the account holder cannot
+    // abdicate. Both mechanisms compose orthogonally — the `_update` hook
+    // refreshes user-observer and regulator ACLs on the same new handle.
+    // MiCAR-style mandatory oversight without taking the user's own auditor
+    // away.
+
+    mapping(address account => address) private _regulatoryObservers;
+
+    event RegulatoryObserverSet(
+        address indexed account,
+        address indexed oldRegulator,
+        address indexed newRegulator
+    );
+
+    function regulatoryObserver(address account) public view returns (address) {
+        return _regulatoryObservers[account];
+    }
+
+    function setRegulatoryObserver(address account, address regulator) external onlyAgent {
+        address oldRegulator = _regulatoryObservers[account];
+        _regulatoryObservers[account] = regulator;
+        emit RegulatoryObserverSet(account, oldRegulator, regulator);
+
+        if (regulator != address(0)) {
+            euint64 balanceHandle = confidentialBalanceOf(account);
+            if (FHE.isInitialized(balanceHandle)) {
+                FHE.allow(balanceHandle, regulator);
+            }
+        }
+    }
+
     // ─── Required multi-inheritance overrides ────────────────────────────────
 
     /// @dev Single entry point for every mint, burn, transfer, wrap and unwrap.
-    ///      The `super` call walks the C3-linearised parent chain and thereby
-    ///      activates the full seven-step compliance pipeline documented in the
-    ///      contract-level NatSpec above. This one line is the contract's entire
-    ///      transfer-security surface.
+    ///      The `super` call walks the C3-linearised parent chain and activates
+    ///      the inherited seven-step compliance pipeline documented in the
+    ///      contract-level NatSpec above. The trailing block grants
+    ///      regulatory-observer ACLs on the freshly produced balance and
+    ///      transferred handles — step 8 of the pipeline.
     function _update(
         address from,
         address to,
@@ -132,10 +170,54 @@ contract ConfidentialEUR is ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapp
     )
         internal
         override(ERC7984ObserverAccess, ERC7984Rwa, ERC7984ERC20Wrapper)
-        returns (euint64)
+        returns (euint64 transferred)
     {
-        return super._update(from, to, amount);
+        transferred = super._update(from, to, amount);
+        _grantRegulatoryAccess(from, to, transferred);
     }
+
+    /// @dev Force-transfer-path regulatory-observer refresh. `ERC7984Rwa._forceUpdate`
+    ///      calls `super._update` from Rwa's MRO position, which intentionally skips
+    ///      Wrapper-cap (stage 1) and `whenNotPaused` (stage 2) — the M6 bypass
+    ///      matrix. The same C3 jump also skips `cEUR._update` (this class is
+    ///      most-derived, above Rwa in the MRO), so without this override the
+    ///      regulatory-observer ACL grant would silently miss every force
+    ///      transfer. Reusing `_grantRegulatoryAccess` keeps step 8 of the
+    ///      pipeline symmetric across the normal and force paths.
+    function _forceUpdate(
+        address from,
+        address to,
+        euint64 encryptedAmount
+    )
+        internal
+        override
+        returns (euint64 transferred)
+    {
+        transferred = super._forceUpdate(from, to, encryptedAmount);
+        _grantRegulatoryAccess(from, to, transferred);
+    }
+
+    /// @dev Grants regulatory-observer ACL on the freshly produced balance and
+    ///      transferred handles for both transfer sides. Called from both
+    ///      `_update` (normal path) and `_forceUpdate` (force path) — same body,
+    ///      two entry points, structurally guaranteed path symmetry.
+    function _grantRegulatoryAccess(address from, address to, euint64 transferred) private {
+        if (from != address(0)) {
+            address fromRegulator = _regulatoryObservers[from];
+            if (fromRegulator != address(0)) {
+                FHE.allow(confidentialBalanceOf(from), fromRegulator);
+                FHE.allow(transferred, fromRegulator);
+            }
+        }
+        if (to != address(0)) {
+            address toRegulator = _regulatoryObservers[to];
+            if (toRegulator != address(0)) {
+                FHE.allow(confidentialBalanceOf(to), toRegulator);
+                FHE.allow(transferred, toRegulator);
+            }
+        }
+    }
+
 
     function supportsInterface(
         bytes4 interfaceId

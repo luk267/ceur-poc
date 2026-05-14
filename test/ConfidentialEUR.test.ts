@@ -10,7 +10,7 @@ import { FhevmType } from "@fhevm/mock-utils";
  * state needs `assertCoprocessorInitialized`, otherwise FHE ops revert.
  */
 async function deployFixture() {
-    const [admin, agent, user1, user2, user3, outsider] = await ethers.getSigners();
+    const [admin, agent, user1, user2, user3, outsider, user4, user5] = await ethers.getSigners();
 
     const MockEURC = await ethers.getContractFactory("MockEURC");
     const eurc = await MockEURC.deploy();
@@ -23,7 +23,7 @@ async function deployFixture() {
     await ceur.connect(admin).addAgent(agent.address);
     await hre.fhevm.assertCoprocessorInitialized(ceur, "ConfidentialEUR");
 
-    return { ceur, eurc, admin, agent, user1, user2, user3, outsider };
+    return { ceur, eurc, admin, agent, user1, user2, user3, user4, user5, outsider };
 }
 
 describe("ConfidentialEUR", function () {
@@ -1014,6 +1014,215 @@ describe("ConfidentialEUR", function () {
                 ceur.connect(outsider).setObserver(alice.address, outsider.address)
             ).to.be.revertedWithCustomError(ceur, "Unauthorized");
         });
+    });
+
+
+    describe("Regulatory observer (M7)", function () {
+        let ceur: any;
+        let eurc: any;
+        let agent: any;
+        let alice: any;       // KYC'd account holder
+        let bob: any;         // user-set observer (no KYC needed)
+        let charlie: any;     // KYC'd transfer recipient
+        let regulator: any;   // agent-appointed, no KYC needed
+        let regulatorB: any;  // Charlie's regulator, agent-appointed
+        let outsider: any;
+
+        const WRAP_AMOUNT = 1000_000_000n;
+        const TRANSFER_AMOUNT = 500_000_000n;
+
+        beforeEach(async function () {
+            ({ ceur, eurc, agent, user1: alice, user2: bob, user3: charlie, user4: regulator, user5: regulatorB, outsider } = await deployFixture());
+
+            await ceur.connect(agent).approveUser(alice.address);
+            await ceur.connect(agent).approveUser(charlie.address);
+
+            await eurc.connect(alice).mint(alice.address, WRAP_AMOUNT);
+            await eurc.connect(alice).approve(await ceur.getAddress(), WRAP_AMOUNT);
+            await ceur.connect(alice).wrap(alice.address, WRAP_AMOUNT);
+        });
+
+        it("setRegulatoryObserver grants the regulator access to the existing balance", async function () {
+            // Agent appoints a regulator for Alice — the setter's init-guarded FHE.allow grants the regulator ACL on the current handle.
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, regulator.address);
+
+            // Regulator can decrypt Alice's balance — proof that FHE.allow ran inside the setter.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const balanceSeenByRegulator = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), regulator
+            );
+            expect(balanceSeenByRegulator).to.equal(WRAP_AMOUNT);
+        });
+
+        it("regulator keeps access after a transfer", async function () {
+            // Agent appoints the regulator — initial ACL grant covers Alice's current balance handle.
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, regulator.address);
+
+            // Alice transfers 500 cEUR to Charlie — _update produces a new balance handle for Alice.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Regulator can still decrypt Alice's NEW balance — proof that the _update hook re-allowed the regulator on the new handle.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const balanceSeenByRegulator = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), regulator
+            );
+            expect(balanceSeenByRegulator).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+        });
+
+        it("user-observer and regulator coexist on the same handle after a transfer", async function () {
+            // Alice appoints Bob as her user-observer; agent appoints the regulator. Two parallel ACL paths on the same balance.
+            await ceur.connect(alice).setObserver(alice.address, bob.address);
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, regulator.address);
+
+            // Alice transfers 500 cEUR to Charlie — _update walks OZ's user-observer refresh AND our regulator refresh on the new handle.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Both can decrypt the NEW balance handle — orthogonal composition: neither mechanism shadows the other.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const balanceSeenByBob = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), bob
+            );
+            const balanceSeenByRegulator = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), regulator
+            );
+            expect(balanceSeenByBob).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+            expect(balanceSeenByRegulator).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+        });
+
+        it("force transfer grants ACL to regulators on both sides", async function () {
+            // Two regulators, one per account — the _update hook must refresh both ACLs on a single transfer.
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, regulator.address);
+            await ceur.connect(agent).setRegulatoryObserver(charlie.address, regulatorB.address);
+
+            // Agent-encrypted transfer — proof binds to msg.sender = agent for the force path.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                agent.address
+            );
+            await ceur.connect(agent)["forceConfidentialTransferFrom(address,address,bytes32,bytes)"](
+                alice.address,
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Alice's regulator decrypts Alice's new balance — from-side branch fired.
+            const aliceHandle = await ceur.confidentialBalanceOf(alice.address);
+            const aliceSeenByRegulator = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, aliceHandle, await ceur.getAddress(), regulator
+            );
+            expect(aliceSeenByRegulator).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+
+            // Charlie's regulator decrypts Charlie's new balance — to-side branch fired (handle freshly initialised by _update).
+            const charlieHandle = await ceur.confidentialBalanceOf(charlie.address);
+            const charlieSeenByRegulatorB = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, charlieHandle, await ceur.getAddress(), regulatorB
+            );
+            expect(charlieSeenByRegulatorB).to.equal(TRANSFER_AMOUNT);
+        });
+
+        it("outsiders cannot setRegulatoryObserver", async function () {
+            // Setter is agent-gated — neither the account holder nor a random caller has AGENT_ROLE.
+            await expect(
+                ceur.connect(outsider).setRegulatoryObserver(alice.address, regulator.address)
+            ).to.be.revertedWithCustomError(ceur, "AccessControlUnauthorizedAccount");
+        });
+
+        it("setting a regulator for an unfunded account succeeds and grants ACL on the first inflow", async function () {
+            // Charlie is KYC'd but has no balance — confidentialBalanceOf returns an uninitialised handle.
+            // The setter's init-guard skips FHE.allow without reverting.
+            await expect(
+                ceur.connect(agent).setRegulatoryObserver(charlie.address, regulator.address)
+            ).to.not.be.reverted;
+
+            // Mapping is persisted regardless — the skipped FHE.allow is independent of the slot update.
+            expect(await ceur.regulatoryObserver(charlie.address)).to.equal(regulator.address);
+
+            // Alice transfers 500 cEUR to Charlie — _update initialises Charlie's handle AND the to-side branch in
+            // _grantRegulatoryAccess grants the catch-up ACL.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Regulator decrypts Charlie's freshly initialised balance — proof that the catch-up grant fired.
+            const charlieHandle = await ceur.confidentialBalanceOf(charlie.address);
+            const charlieSeenByRegulator = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, charlieHandle, await ceur.getAddress(), regulator
+            );
+            expect(charlieSeenByRegulator).to.equal(TRANSFER_AMOUNT);
+        });
+
+        it("clearing the regulator stops future grants but preserves past ACL", async function () {
+            // Set the regulator and capture Alice's current handle — the setter grants ACL on this exact ciphertext.
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, regulator.address);
+            const oldHandle = await ceur.confidentialBalanceOf(alice.address);
+
+            // Sanity: regulator can decrypt the current handle while still in office.
+            const balanceBefore = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, oldHandle, await ceur.getAddress(), regulator
+            );
+            expect(balanceBefore).to.equal(WRAP_AMOUNT);
+
+            // Soft-revoke — mapping cleared, getter confirms, _grantRegulatoryAccess will now skip both branches.
+            await ceur.connect(agent).setRegulatoryObserver(alice.address, ethers.ZeroAddress);
+            expect(await ceur.regulatoryObserver(alice.address)).to.equal(ethers.ZeroAddress);
+
+            // Alice transfers — _update produces a new balance handle, but _grantRegulatoryAccess sees mapping==0 and skips.
+            const enc = await hre.fhevm.encryptUint(
+                FhevmType.euint64,
+                TRANSFER_AMOUNT,
+                await ceur.getAddress(),
+                alice.address
+            );
+            await ceur.connect(alice)["confidentialTransfer(address,bytes32,bytes)"](
+                charlie.address,
+                enc.externalEuint,
+                enc.inputProof
+            );
+
+            // Past ACL preserved: regulator can still decrypt the OLD handle — FHE-ACL is per-handle persistent.
+            const balanceFromOldHandle = await hre.fhevm.userDecryptEuint(
+                FhevmType.euint64, oldHandle, await ceur.getAddress(), regulator
+            );
+            expect(balanceFromOldHandle).to.equal(WRAP_AMOUNT);
+
+            // Future grants stopped: regulator cannot decrypt the NEW handle.
+            const newHandle = await ceur.confidentialBalanceOf(alice.address);
+            await expect(
+                hre.fhevm.userDecryptEuint(FhevmType.euint64, newHandle, await ceur.getAddress(), regulator)
+            ).to.be.rejected;
+        });
+
     });
 
 });
